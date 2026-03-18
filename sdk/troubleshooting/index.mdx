@@ -1,0 +1,190 @@
+---
+title: "Troubleshooting Guide"
+description: "Diagnose common H2H and C2C terminal issues and choose the right recovery action for each scenario"
+---
+
+# Troubleshooting Guide
+
+Use this guide when a payment flow does not behave as expected on a real terminal or during local terminal testing. It helps you identify whether the issue is in your H2H or C2C runtime flow and choose the right recovery action.
+
+<Info>
+This page focuses on operational troubleshooting for SDK and terminal runtime issues. For request validation, authentication, and simulation-specific API errors, see [Errors & Simulations](/api-reference/terminal-api/errors).
+</Info>
+
+## Before you troubleshoot
+
+Confirm these basics before you retry a payment:
+
+- Identify your connection mode: `H2H` or `C2C`
+- Confirm whether you are using simulation or a real terminal
+- Verify the terminal shows `Online`, `Connected`, or `Ready`
+- Verify the `terminal_id`, IP address, client key, and environment are correct
+- Check that your terminal, mobile device, and Gateway service are on the expected network
+
+<Tip>
+When the payment outcome is unclear, avoid immediately starting a second payment. First confirm whether the original transaction completed, was canceled, or needs to be voided.
+</Tip>
+
+## Troubleshooting matrix
+
+Use this table to choose the next action quickly.
+
+| Case | Connection mode | What to check first | Recommended action |
+|------|-----------------|---------------------|--------------------|
+| Terminal does not show a payment prompt | `H2H` | Terminal connection status, terminal registration, network connectivity, test vs live environment | Confirm the terminal is connected and registered, then restart the SDK or gateway connection if needed |
+| Payment completed on terminal but your app received no final response | `H2H` | Payment Session status, callback URL, local network stability | Query `GET /v1/terminal/sessions/{id}` to retrieve the latest status before retrying |
+| Receipt printed but no webhook or callback arrived | `H2H` | Whether the receipt indicates a completed transaction and whether this is a BRI flow | For BRI, call `POST /v1/terminal/sessions/{id}/retry` so the app can verify status and redo the transaction if needed |
+| Payment successful, but your server received no webhook | `H2H` | Webhook endpoint availability and the latest Payment Session state | Query `GET /v1/terminal/sessions/{id}` and reconcile your backend from the latest session status |
+| Timeout on request | `C2C` | Whether the terminal still shows an in-progress transaction | Cancel the transaction on the terminal if it has not completed. Otherwise, void the transaction and redo it |
+| Receipt printed and no response | `C2C` | Whether the terminal is still on the transaction summary or detail screen | Make sure the transaction summary or detail screen on the terminal is already closed. Otherwise, void the transaction and redo it |
+| Cannot connect to Terminal Gateway | `C2C` | Gateway service status, port `8189`, terminal IP address, same-network access | Restore gateway connectivity, correct the device configuration, and retry only after the gateway is reachable |
+| Requests fail with authentication or device configuration errors | `C2C` | `CLIENT_KEY`, terminal device setup, terminal ID match | Re-initialize the SDK with the correct client key and verify the configured terminal device |
+
+## H2H scenarios
+
+<AccordionGroup>
+<Accordion title="Terminal does not respond to a real-terminal payment">
+  **What this usually means**: The Terminal API accepted the request, but the terminal is not reachable through the SDK or gateway layer.
+
+  **Check these items**:
+  - Confirm the terminal appears connected or ready in your app or Gateway
+  - Verify the terminal is registered with the correct `terminal_id`
+  - Make sure the terminal and your app can reach each other on the network
+  - Confirm you are using the correct environment for the terminal registration
+
+  **Next action**:
+  - Restart the terminal connection if the device appears offline
+  - Retry the payment only after the terminal returns to a healthy state
+</Accordion>
+
+<Accordion title="Payment finished on the terminal, but your app received no final response">
+  **What this usually means**: The terminal may have completed the payment, but your app or callback handler did not receive the final state.
+
+  **Check these items**:
+  - Query the latest Payment Session status
+  - Review webhook or callback logs
+  - Verify the callback URL is reachable and returns HTTP `200`
+  - Check for intermittent network issues between the terminal, app, and backend
+
+  **Next action**:
+  - Call `GET /v1/terminal/sessions/{id}` to confirm the latest authoritative state
+  - Update your order state from the latest session result instead of creating a new payment immediately
+</Accordion>
+
+<Accordion title="Receipt printed, but no webhook or callback arrived">
+  <Note>
+  This recovery flow is especially important for BRI terminals.
+  </Note>
+
+  **What this usually means**: The terminal may have printed a receipt before your integration received the final transaction result.
+
+  **Next action**:
+  - Call `POST /v1/terminal/sessions/{id}/retry`
+  - Let the app verify the current transaction status and redo the payment only if the original transaction is incomplete
+
+  **Use this when**:
+  - The terminal printed a receipt
+  - Your app or backend never received the final callback
+  - You need the terminal side to verify whether the payment really completed
+</Accordion>
+
+<Accordion title="Payment successful, but your server received no webhook">
+  **What this usually means**: The payment may be complete, but webhook delivery to your backend failed or was delayed.
+
+  **Check these items**:
+  - Webhook endpoint availability
+  - Server logs and firewall configuration
+  - Whether the webhook handler returns HTTP `200`
+
+  **Next action**:
+  - Query `GET /v1/terminal/sessions/{id}` to retrieve the latest status
+  - Reconcile the order from the Payment Session status before you consider a retry
+</Accordion>
+</AccordionGroup>
+
+## C2C scenarios
+
+<AccordionGroup>
+<Accordion title="Timeout on request">
+  **What this usually means**: Your app did not receive a timely response from the terminal or Gateway, but the terminal may still be processing the transaction.
+
+  **Next action**:
+  - Cancel the transaction on the terminal if it has not completed
+  - If the payment already completed, void the transaction and redo it
+
+  <Warning>
+  Do not immediately resend the same payment request without confirming whether the original transaction completed on the terminal.
+  </Warning>
+</Accordion>
+
+<Accordion title="Receipt printed and no response">
+  **What this usually means**: The terminal completed a payment or receipt action, but your app did not get the response back from the C2C flow.
+
+  **Check these items**:
+  - Confirm whether the terminal is still showing the transaction summary or detail screen
+  - Confirm whether the operator already dismissed the transaction result on the terminal
+
+  **Next action**:
+  - Make sure the transaction summary or detail screen on the terminal is already closed
+  - If the transaction already completed and you need to reverse it, void the transaction and redo it
+</Accordion>
+
+<Accordion title="Cannot connect to Terminal Gateway">
+  **What this usually means**: The SDK cannot reach the local Gateway service or the configured terminal device.
+
+  **Check these items**:
+  - Verify the Gateway service is running
+  - Confirm the configured port is `8189`
+  - Verify the terminal IP address is correct
+  - Make sure your app and Gateway are on the same reachable network
+
+  **Next action**:
+  - Fix the local connectivity issue first
+  - Retry terminal commands only after the Gateway is reachable again
+</Accordion>
+
+<Accordion title="Authentication failed or no terminal device is configured">
+  **What this usually means**: The SDK is initialized with the wrong `CLIENT_KEY`, the configured terminal does not match, or no default device is set.
+
+  **Next action**:
+  - Re-initialize the SDK with the correct `CLIENT_KEY`
+  - Verify the configured terminal device uses the correct terminal ID and IP address
+  - Set or pass the intended terminal device before sending the next command
+</Accordion>
+</AccordionGroup>
+
+## Recovery actions
+
+Use the recovery action that matches the current state of the transaction:
+
+| Action | When to use it | Applies to |
+|--------|----------------|------------|
+| Cancel the transaction | The terminal is still waiting for completion and the transaction has not finished | `C2C` |
+| Void the payment | The payment already completed on the terminal, but you need to reverse it before retrying | `H2H`, `C2C` |
+| Query the latest Payment Session | The payment outcome is unclear and you need the latest backend-confirmed status | `H2H` |
+| Retry the Payment Session | A receipt printed or the transaction looks stuck after terminal-side processing, and you need the app to verify status and redo only if incomplete | `H2H` |
+| Restart the connection | The terminal or Gateway is offline, unreachable, or stuck in an unhealthy state | `H2H`, `C2C` |
+
+<Note>
+For H2H, treat the Payment Session as the source of truth before you initiate another payment. For C2C, confirm the terminal state first so you do not create duplicate customer-facing actions.
+</Note>
+
+## Related docs
+
+<CardGroup cols={2}>
+  <Card title="Errors & Simulations" icon="triangle-exclamation" href="/api-reference/terminal-api/errors">
+    Review API-side errors, simulation amounts, and real-terminal testing guidance.
+  </Card>
+
+  <Card title="Gateway App Configuration" icon="computer" href="/sdk/gateway/app-configuration">
+    Check device status colors, IP address setup, and Gateway connectivity.
+  </Card>
+
+  <Card title="Terminal H2H iOS SDK" icon="apple" href="/sdk/h2h/ios-sdk">
+    Review H2H setup details and platform-specific recovery options.
+  </Card>
+
+  <Card title="Terminal C2C iOS SDK" icon="apple" href="/sdk/c2c/ios-sdk">
+    Review C2C SDK setup details and local Gateway communication guidance.
+  </Card>
+</CardGroup>

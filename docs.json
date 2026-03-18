@@ -79,6 +79,12 @@
               "sdk/index"
             ]
           },
+        {
+          "group": "Troubleshooting",
+          "pages": [
+            "sdk/troubleshooting/index"
+          ]
+        },
           {
             "group": "Terminal App",
             "pages": [
