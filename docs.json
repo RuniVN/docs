@@ -28,6 +28,12 @@
               "guides/migration/xen-bri-to-h2h",
               "guides/migration/xen-bri-sdk-to-c2c"
             ]
+          },
+          {
+            "group": "Error Handling",
+            "pages": [
+              "guides/error-handling/overview"
+            ]
           }
         ]
       },

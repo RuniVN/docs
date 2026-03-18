@@ -1,0 +1,228 @@
+---
+title: "Error Handling Overview"
+description: "Common failure scenarios when integrating with Xendit Terminal API and recommended actions for each."
+---
+
+## Overview
+
+A payment transaction involves two distinct objects:
+
+- **Payment Session** — a temporary context managing the preparation phase. States: `ACTIVE` → `COMPLETED` / `FAILED` / `CANCELED`
+- **Payment Object** — a permanent, immutable record created only after successful payment processing
+
+Most failure scenarios occur at the intersection of these two — where the session state and the actual financial outcome may be out of sync.
+
+<Warning>
+  Never assume a timeout means failure. Always query the payment session status before retrying or cancelling.
+</Warning>
+
+---
+
+## Scenario 1: Error Response After Sending Payment Request
+
+**What happened:**
+Your POS/backend sent a payment request and received an explicit error response.
+
+**Key distinction:**
+
+| Response | Meaning | Action |
+|---|---|---|
+| `4xx` | Request received and rejected | Fix parameters, create new session |
+| `5xx` | Xendit server error | Retry with same `idempotency_key` |
+
+**Recommended steps:**
+
+<Steps>
+  <Step title="Check error code in response body">
+    Identify whether it is a client error (4xx) or server error (5xx).
+  </Step>
+  <Step title="For 4xx errors">
+    Do not retry with the same parameters. Fix the request and create a new payment session.
+  </Step>
+  <Step title="For 5xx errors">
+    Wait 5–10 seconds, then retry using the same `idempotency_key`.
+  </Step>
+  <Step title="If retry fails 3 times">
+    Escalate to Xendit support with the `payment_session_id`.
+  </Step>
+</Steps>
+
+<Info>
+  Always include a unique `idempotency_key` per payment attempt. This prevents duplicate charges on retry.
+</Info>
+
+---
+
+## Scenario 2: Timeout After Sending Request
+
+**What happened:**
+Your system sent a payment request but did not receive a response within the timeout window.
+
+**Why this is dangerous:**
+The terminal may have already processed the payment successfully while the response was lost in transit. Retrying without checking status can result in **double charges**.
+
+**Recommended steps:**
+
+<Steps>
+  <Step title="Do not immediately retry or mark as failed">
+    Treat the transaction as status unknown until confirmed.
+  </Step>
+  <Step title="Query payment session status">
+    ```
+    GET /v1/terminal/sessions/{payment_session_id}
+    ```
+  </Step>
+  <Step title="Act based on session status">
+    | Status | Action |
+    |---|---|
+    | `COMPLETED` | Payment succeeded — retrieve `payment_id` |
+    | `ACTIVE` | Still processing — poll again in 5–10s |
+    | `FAILED` | Safe to retry with a new session |
+    | `CANCELED` | Session expired — create a new session |
+  </Step>
+  <Step title="Escalate if still ACTIVE after 120 seconds">
+    Flag for manual reconciliation. Do not retry.
+  </Step>
+</Steps>
+
+**Recommended timeout settings:**
+
+| Setting | Value |
+|---|---|
+| Request timeout | 30–60 seconds |
+| Poll interval | 5–10 seconds |
+| Max wait before escalation | 120 seconds |
+
+---
+
+## Scenario 3: Payment Successful but No Webhook Received
+
+**What happened:**
+The customer's payment was processed successfully, but the webhook callback from Xendit never arrived.
+
+**Common causes:**
+- Webhook endpoint temporarily unavailable
+- Network issues between Xendit and your server
+- Webhook delivery delay
+
+**Recommended steps:**
+
+<Steps>
+  <Step title="Do not wait indefinitely for the webhook">
+    Implement a polling fallback with a reasonable timeout.
+  </Step>
+  <Step title="Query session status directly">
+    ```
+    GET /v1/terminal/sessions/{payment_session_id}
+    ```
+    If the session is `COMPLETED`, the `payment_id` is available — proceed normally.
+  </Step>
+  <Step title="Verify webhook signature when it arrives">
+    Use the `X-CALLBACK-TOKEN` header to verify payload authenticity.
+  </Step>
+  <Step title="Implement idempotent webhook handling">
+    Process each `payment_id` only once regardless of how many times the webhook is delivered.
+  </Step>
+</Steps>
+
+<Tip>
+  Always treat webhooks as fast notifications only — not the source of truth. Use API queries to confirm final status.
+</Tip>
+
+---
+
+## Scenario 4: Transaction Stuck in PENDING / Not Updated
+
+**What happened:**
+The payment session has been in `ACTIVE` or processing state longer than expected.
+
+**Common causes:**
+- Network interruption between terminal and Xendit backend
+- Terminal provider returning UNKNOWN status (e.g., error code 99)
+- System processing delay
+
+**Recommended steps:**
+
+<Steps>
+  <Step title="Query session status">
+    ```
+    GET /v1/terminal/sessions/{payment_session_id}
+    ```
+  </Step>
+  <Step title="If still ACTIVE after 3 minutes">
+    Flag for manual reconciliation. Do not retry.
+  </Step>
+  <Step title="Contact Xendit support with the following information">
+    - `payment_session_id`
+    - Terminal serial number
+    - Transaction timestamp
+    - Transaction amount
+  </Step>
+</Steps>
+
+<Warning>
+  Never retry a payment in UNKNOWN state. The transaction may have already succeeded at the bank level.
+</Warning>
+
+---
+
+## Scenario 5: Customer Cancels on Terminal / Session Abandoned
+
+**What happened:**
+The customer pressed cancel on the terminal, walked away, or the session timed out without payment being made.
+
+**Recommended steps:**
+
+<Steps>
+  <Step title="Check for cancel callback">
+    Some providers send an automatic session status update to `CANCELED`.
+  </Step>
+  <Step title="Query session status if no webhook within 30 seconds">
+    ```
+    GET /v1/terminal/sessions/{payment_session_id}
+    ```
+  </Step>
+  <Step title="Act based on session status">
+    | Status | Action |
+    |---|---|
+    | `CANCELED` | Safe to create a new payment session |
+    | `ACTIVE` | Wait up to 120s, then treat as expired |
+  </Step>
+</Steps>
+
+<Note>
+  For providers without a cancel callback, implement a server-side session expiry at 120–180 seconds and add a manual "Cancel Payment" option in your POS UI.
+</Note>
+
+---
+
+## Summary
+
+| Scenario | Session Status | Recommended Action |
+|---|---|---|
+| Error response (4xx) | `FAILED` | Fix parameters, create new session |
+| Error response (5xx) | Unknown | Retry with same `idempotency_key` |
+| Timeout | Unknown | Query status — do NOT retry blindly |
+| No webhook | `COMPLETED` | Query API, proceed with `payment_id` |
+| Stuck PENDING | `ACTIVE` | Poll, escalate after 3 minutes |
+| Customer cancel | `CANCELED` | Create new session safely |
+| UNKNOWN status | Unknown | Manual reconciliation — do NOT retry |
+
+---
+
+## General Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Idempotency Keys" icon="key">
+    Always include a unique `idempotency_key` per payment attempt. Reuse on retry to prevent duplicate charges.
+  </Card>
+  <Card title="Never Assume Timeout = Failure" icon="clock">
+    Always query payment session status before retrying or cancelling.
+  </Card>
+  <Card title="Webhooks Are Notifications Only" icon="bell">
+    Always implement an API polling fallback. Do not rely solely on webhooks as the source of truth.
+  </Card>
+  <Card title="Never Retry UNKNOWN Status" icon="triangle-exclamation">
+    A transaction in UNKNOWN state may have already succeeded. Flag for manual reconciliation instead.
+  </Card>
+</CardGroup>
