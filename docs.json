@@ -34,6 +34,12 @@
             "pages": [
               "guides/error-handling/overview"
             ]
+          },
+          {
+            "group": "VN Terminal (Atom)",
+            "pages": [
+              "guides/atom-integration/overview"
+            ]
           }
         ]
       },

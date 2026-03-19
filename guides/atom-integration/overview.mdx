@@ -1,0 +1,443 @@
+---
+title: "Atom POS Integration (Vietnam)"
+description: "Detailed integration guide for Xendit EDC with Atom POS in Vietnam — card payments, QR, callbacks, void, and settlement flows."
+---
+
+## Overview
+
+Xendit's Vietnam EDC integration uses **Atom Solution** (`atomsolution.vn`) as the payment processor for card and QR transactions. The integration involves three layers:
+
+| Layer | Component | Role |
+|---|---|---|
+| **Merchant App** | POS Application | Initiates payment sessions via Xendit API |
+| **Xendit Backend** | `edc-service` | Orchestrates payment requests, stores state, sends webhooks |
+| **Terminal** | Atom POS Application | Processes card/QR on physical EDC device |
+
+---
+
+## Architecture
+
+```mermaid
+graph TD
+    A[POS App / Merchant] -->|POST /terminal/sessions| B[Xendit EDC Service]
+    B -->|Authorize + CreatePaymentRequest| C[Atom Backend API]
+    C -->|Forward to terminal via serial number| D[Atom POS App on Device]
+    D -->|Card tap/swipe/QR scan| E[Bank Host / NAPAS / VietQR]
+    E -->|Auth response| D
+    D -->|Encrypted callback| C
+    C -->|Decrypted callback| B
+    B -->|Webhook| A
+    B -->|Update session status| F[(Database)]
+```
+
+---
+
+## Authentication with Atom
+
+Xendit authenticates with Atom's backend before each payment request. Atom uses **OAuth2 Client Credentials** with AES-256-CBC encrypted payloads.
+
+```mermaid
+sequenceDiagram
+    participant XDT as Xendit EDC Service
+    participant ATOM as Atom Backend API
+
+    XDT->>ATOM: POST /v1/authorize<br/>(Encrypted: grant_type, client_id, client_secret, username, password)
+    ATOM-->>XDT: Encrypted response → { access_token, token_type, expires_in }
+    Note over XDT: Token cached for subsequent requests
+```
+
+### Encryption
+
+All Atom API requests/responses are encrypted with **AES-256-CBC + PKCS7 padding**:
+
+```
+Payload → JSON → AES-256-CBC encrypt (random IV) → hex encode → send as "data" field
+Response "data" field → hex decode → AES-256-CBC decrypt → JSON parse
+```
+
+- **Key:** AES secret key (hex string, 32 bytes = 256-bit)
+- **IV:** Random 16 bytes prepended to ciphertext
+- **Wire format:** `hex(IV + ciphertext)`
+
+---
+
+## Payment Session Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> ACTIVE: POST /terminal/sessions
+    ACTIVE --> COMPLETED: Payment successful (callback)
+    ACTIVE --> FAILED: Payment failed (callback)
+    ACTIVE --> ACTIVE: POST /sessions/:id/retry
+    COMPLETED --> [*]
+    FAILED --> ACTIVE: Retry
+```
+
+| Status | Description |
+|---|---|
+| `ACTIVE` | Session created, waiting for terminal to process |
+| `COMPLETED` | Payment successful, `payment_id` available |
+| `FAILED` | Payment failed — safe to retry |
+
+---
+
+## Card Payment Flow (SALE)
+
+```mermaid
+sequenceDiagram
+    participant POS as POS App
+    participant XDT as Xendit EDC Service
+    participant ATOM as Atom Backend
+    participant TERM as Atom POS Device
+    participant BANK as Bank Host
+
+    POS->>XDT: POST /terminal/sessions<br/>{ amount, currency, terminal_id, order_id }
+    XDT->>XDT: Check idempotency key<br/>Check terminal registered<br/>Check no active session on terminal
+
+    XDT->>ATOM: POST /v1/authorize (encrypted)
+    ATOM-->>XDT: { access_token }
+
+    XDT->>ATOM: POST /v1/payment-terminal (encrypted)<br/>{ serialNumber, requestId, orderId, amount, paymentType: "CARD" }
+    ATOM-->>XDT: { code: "00", data: true }
+    XDT-->>POS: { payment_session_id, status: "ACTIVE" }
+
+    Note over TERM: Atom routes request to device via serial number
+    TERM->>TERM: Display payment prompt<br/>Customer taps/swipes card
+
+    TERM->>BANK: Send authorization request (ISO 8583)
+    BANK-->>TERM: Auth response + approval code
+
+    TERM->>ATOM: Send transaction result
+    ATOM->>XDT: POST /callbacks (encrypted callback)
+    XDT->>XDT: Decrypt callback<br/>Validate signature<br/>Save transaction
+
+    XDT-->>POS: Webhook: payment.succeeded / payment.failed
+    POS->>XDT: GET /terminal/sessions/:id (poll if webhook missed)
+```
+
+### Card Callback Payload (Decrypted)
+
+```json
+{
+  "requestID": "ps-abc123",
+  "orderID": "order-001",
+  "amount": "100000",
+  "tip": "0",
+  "paymentType": "CARD",
+  "transactionType": "SALE",
+  "serialNumber": "EDC001234",
+  "status": "SUCCESS",
+  "detailTransaction": {
+    "txn_id": "TXN001",
+    "serial_no": "EDC001234",
+    "tid": "12345678",
+    "mid": "MID001",
+    "batch_no": "000001",
+    "auth_id_response": "703336",
+    "retrieval_ref_no": "413054665138",
+    "card_no": "942147****4567",
+    "card_type": "VISA",
+    "card_origin": "1",
+    "amount": "100000",
+    "tip": "0",
+    "invoice_no": "000008",
+    "trace_no": "000007",
+    "transaction_type": "SALE",
+    "response_code": "00",
+    "created_unix_time": 1710000000,
+    "is_settle": 0,
+    "is_void": 0
+  }
+}
+```
+
+**Card origin mapping:**
+- `"0"` → Domestic (Local)
+- `"1"` → International (Foreign)
+- `"2"` → Unknown
+
+**Card type → Channel mapping:**
+
+| Atom `card_type` | Xendit Channel | Transaction Type |
+|---|---|---|
+| `VISA` | VISA | Credit Card |
+| `MASTERCARD` | MASTERCARD | Credit Card |
+| `JCB` | JCB | Credit Card |
+| `AMEX` | AMEX | Credit Card |
+| `UNION_PAY` | UNION_PAY | Credit Card |
+| `NAPAS` | NAPAS | Debit Card |
+
+---
+
+## QR Payment Flow (VietQR)
+
+```mermaid
+sequenceDiagram
+    participant POS as POS App
+    participant XDT as Xendit EDC Service
+    participant ATOM as Atom Backend
+    participant TERM as Atom POS Device
+    participant NAPAS as NAPAS / VietQR Network
+
+    POS->>XDT: POST /terminal/sessions<br/>{ amount, currency: "VND", terminal_id, payment_method_types: ["QR"] }
+    XDT->>ATOM: POST /v1/authorize (encrypted)
+    ATOM-->>XDT: { access_token }
+
+    XDT->>ATOM: POST /v1/payment-terminal (encrypted)<br/>{ serialNumber, requestId, orderId, amount, paymentType: "QR" }
+    ATOM-->>XDT: { code: "00" }
+    XDT-->>POS: { payment_session_id, status: "ACTIVE" }
+
+    TERM->>TERM: Display QR code on screen
+
+    Note over TERM: Customer scans QR with banking app
+
+    NAPAS->>ATOM: Transfer notification (VietQR callback)
+    ATOM->>XDT: POST /callbacks (encrypted QR callback)
+    XDT->>XDT: Parse QR detail<br/>Extract orderID + serialNo from narrative field
+    XDT-->>POS: Webhook: payment.succeeded
+```
+
+### QR Callback Payload (Decrypted)
+
+```json
+{
+  "requestID": "ps-abc123",
+  "orderID": "order-001",
+  "amount": "100000",
+  "paymentType": "QR",
+  "transactionType": "SALE",
+  "serialNumber": "EDC001234",
+  "status": "SUCCESS",
+  "detailTransaction": {
+    "externalRefNo": "EXT001",
+    "trnRefNo": "TRN001",
+    "accNo": "1234567890",
+    "lcyAmount": "100000",
+    "narrative": "order-001 EDC001234",
+    "fromAccNo": "9876543210",
+    "fromAccName": "NGUYEN VAN A",
+    "fromBankCode": "970436",
+    "fromBankName": "Vietcombank",
+    "napasTraceId": "NAPAS001",
+    "serialNumber": "EDC001234",
+    "txnInitDt": "2026-03-19T10:00:00Z"
+  }
+}
+```
+
+<Note>
+  For QR callbacks, `orderID` and `serialNumber` are extracted from the `narrative` field in format: `"{orderID} {serialNo}"`. Ensure your `orderId` does not contain spaces.
+</Note>
+
+---
+
+## Void Flow
+
+Void cancels a previously completed SALE transaction within the same batch.
+
+```mermaid
+sequenceDiagram
+    participant POS as POS App
+    participant XDT as Xendit EDC Service
+    participant ATOM as Atom Backend
+    participant TERM as Atom POS Device
+    participant BANK as Bank Host
+
+    POS->>XDT: POST /terminal/payments/:id/void
+    XDT->>XDT: Validate payment exists and is voidable<br/>Check batch not settled
+
+    XDT->>ATOM: POST /v1/authorize
+    ATOM-->>XDT: { access_token }
+
+    XDT->>ATOM: POST /v1/payment-terminal (encrypted)<br/>{ paymentType: "CARD", transactionType: "VOID", invoiceNo }
+    ATOM-->>XDT: Ack
+    ATOM->>TERM: Route VOID to device
+
+    TERM->>BANK: Send VOID request
+    BANK-->>TERM: Void confirmed
+
+    TERM->>ATOM: Void result callback
+    ATOM->>XDT: POST /callbacks (encrypted, transactionType: "VOID")
+    XDT->>XDT: Update transaction is_void = 1
+    XDT-->>POS: Webhook: payment.voided
+```
+
+<Warning>
+  Atom does **not** send a `CANCELLED` status or cancel webhook. If the customer cancels at the terminal, Xendit will only know via timeout — implement server-side session expiry (120-180s) and manual cancel endpoint.
+</Warning>
+
+---
+
+## Settlement Flow
+
+Settlement clears the batch and sends all transactions to the acquiring bank.
+
+```mermaid
+sequenceDiagram
+    participant CRON as Xendit Auto-Settle Cron
+    participant XDT as Xendit EDC Service
+    participant ATOM as Atom Backend
+    participant TERM as Atom POS Device
+    participant BANK as Acquiring Bank
+
+    Note over CRON: Runs at configured time (e.g. end of day)
+    CRON->>XDT: Trigger settlement for all active terminals
+    XDT->>ATOM: POST /v1/authorize
+    ATOM-->>XDT: { access_token }
+
+    XDT->>ATOM: POST /v1/payment-terminal (encrypted)<br/>{ transactionType: "SETTLE" }
+    ATOM->>TERM: Route SETTLE command to device
+    TERM->>BANK: Send batch settlement
+    BANK-->>TERM: Settlement confirmed
+
+    ATOM->>XDT: Settlement callback<br/>{ batchNo, totalAmountSuccess, totalTransSuccess, totalAmountVoid, totalTransVoid }
+    XDT->>XDT: Update batch status<br/>Generate cashup report
+```
+
+### Settlement Response Data
+
+```json
+{
+  "batchNo": "000001",
+  "bankCode": "970454",
+  "terminalId": "12345678",
+  "merchantId": "MID001",
+  "totalAmountSuccess": "500000",
+  "totalTransSuccess": "5",
+  "totalAmountVoid": "100000",
+  "totalTransVoid": "1",
+  "totalAmountRefund": "0",
+  "totalTransRefund": "0",
+  "isoResponseCode": "00"
+}
+```
+
+---
+
+## Atom POS Commands Reference
+
+These are additional commands sent via Android Intent (C2C local integration) from POS App to Atom POS App:
+
+| `tranxType` | Description | Key Response Fields |
+|---|---|---|
+| `SALE` | Process card payment | `approveCode`, `refNo`, `cardNo`, `cardType`, `invoiceNo`, `traceNo` |
+| `VOID` | Cancel a transaction | `invoiceNo` required in request |
+| `SETTLE` | Batch settlement | `totalAmountSuccess`, `batchNo` |
+| `INITIALIZE` | Init/refresh terminal params | No response data |
+| `LOGON` | Re-authenticate terminal with bank | No response data |
+| `CHECK_TRANSACTION` | Query unsettled transaction | Full transaction detail |
+| `CHECK_SETTLEMENT` | Query batch settlement status | `isClearBatch`, totals |
+| `PRNT_LAST_TRANX` | Reprint last receipt | No response data |
+| `PRNT_TRANX` | Print specific receipt by invoiceNo | No response data |
+| `PRNT_SETTLE` | Reprint last settlement | No response data |
+
+### Android Intent Pattern
+
+```kotlin
+// Send to Atom POS
+val intent = Intent("atom.appbank.navigator")
+intent.putExtra("SECRET_KEY", secretKey)
+intent.putExtra("REQUEST_DATA", dataSendRequest.toJson())
+startActivityForResult(intent, RESULT_CODE)
+
+// Receive result
+override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+    if (requestCode == RESULT_CODE) {
+        val response = data?.getStringExtra("RESULT") // JSON string
+    }
+}
+```
+
+---
+
+## Callback Endpoint
+
+Atom sends encrypted callbacks to Xendit EDC Service. Xendit exposes two callback endpoints:
+
+| Endpoint | Auth | Usage |
+|---|---|---|
+| `POST /internal/callbacks` | API Key | For internal/Atom callbacks |
+| `POST /public/callbacks` | None (validated by payload) | For public-facing callbacks |
+
+### Callback Processing Flow
+
+```mermaid
+flowchart TD
+    A[Atom sends encrypted callback] --> B[POST /callbacks]
+    B --> C{Decrypt with AES secret key}
+    C -->|Success| D{paymentType?}
+    C -->|Fail| E[Return 400 error]
+    D -->|CARD| F[Parse CallbackCardDetail]
+    D -->|QR| G[Parse CallbackQRDetail]
+    F --> H[Map card_type → Channel]
+    G --> I[Extract orderID from narrative]
+    H --> J[Save Transaction]
+    I --> J
+    J --> K[Update PaymentSession status]
+    K --> L[Trigger Webhook to merchant]
+    L --> M[Return CallbackResponse 200]
+```
+
+---
+
+## Error Codes
+
+### Atom API Error Codes
+
+| Code | Constant | Description |
+|---|---|---|
+| `00` | `CodeSuccess` | Success |
+| `01` | `CodeAuthenticateError` | Authentication failed |
+| `02` | `CodeURLNotFound` | URL not found |
+| `03` | `CodeMissingFieldError` | Missing required field |
+| `04` | `CodeInvalidFieldError` | Invalid field value |
+| `05` | `CodeUnauthorizedError` | Unauthorized |
+| `06` | `CodeAccessDenied` | Access denied |
+| `07` | `CodeConnectPOSError` | Cannot connect to POS device |
+| `08` | `CodeEncryptionError` | Encryption/decryption error |
+
+### Atom POS Response Codes (Android Intent)
+
+| Code | Meaning |
+|---|---|
+| `200` | Success |
+| `209` | Timeout from EDC device |
+| `210` | Timeout from bank host |
+| `211` | Transaction cancelled by user |
+| `219` | Unknown error |
+| `220` | Must settle batch first |
+| `227` | Network error |
+| `229` | Transaction failed |
+| `413` | Invalid secret key |
+
+### ISO Response Codes
+
+| ISO Code | Meaning |
+|---|---|
+| `00` | Success |
+| `05` | Do not honour |
+| `12` | Invalid transaction |
+| `17` | Customer cancelled |
+| `55` | Incorrect PIN |
+| `91` | Issuer bank unavailable |
+| `94` | Transaction voided |
+| `Z3` | Timeout |
+
+---
+
+## Key Implementation Notes
+
+<CardGroup cols={2}>
+  <Card title="Idempotency" icon="key">
+    Each payment session must have a unique `idempotency_key`. Duplicate sessions on the same terminal are rejected — only one active session per terminal at a time.
+  </Card>
+  <Card title="AES Encryption" icon="lock">
+    All Atom API payloads encrypted with AES-256-CBC. IV is random per request, prepended to ciphertext, hex-encoded. Key must be 32 bytes (64 hex chars).
+  </Card>
+  <Card title="QR Narrative Parsing" icon="qrcode">
+    QR callback `orderID` is embedded in the `narrative` field as `"{orderID} {serialNo}"`. Do not use spaces in orderID.
+  </Card>
+  <Card title="No Cancel Callback" icon="triangle-exclamation">
+    Atom does not send cancellation callbacks. Use server-side session expiry (120-180s) + polling as fallback. Recommend countdown UI for cashiers.
+  </Card>
+</CardGroup>
