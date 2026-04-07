@@ -1,26 +1,18 @@
 openapi: 3.1.0
 info:
-  title: Terminal H2H - Client to Client HTTP API
+  title: Xendit in-person payments API (C2C)
   description:
-    This documentation provides details on the API to facilitate in-person
-    payment sessions using terminal devices. It covers how to create payment
-    sessions, retrieve session details, void payment requests, push operation
-    commands to terminals, and handle terminal callbacks.
+    This specification documents the client-to-client command API for Xendit
+    in-person payments. Use it for local-network terminal commands such as pay,
+    cancel, receipt, settlement, and transaction history.
   version: 1.3.0
-  contact:
-    name: API Support
-    email: support@example.com
-    url: https://example.com/support
-  license:
-    name: Proprietary
-    url: https://example.com/license
 servers:
   - url: http://{IP_ADDRESS}:{PORT}
     description: Client-to-Client Endpoint
     variables:
       IP_ADDRESS:
         default: 172.0.0.1
-        description: The IP address displayed on the Terminal H2H main screen.
+        description: The IP address displayed on the Terminal Gateway App main screen.
       PORT:
         default: "8189"
         description: The port number configured in the Terminal Gateway App.
@@ -29,12 +21,12 @@ servers:
     variables:
       IP_ADDRESS:
         default: 172.0.0.1
-        description: The IP address displayed on the Terminal H2H main screen.
+        description: The IP address displayed on the Terminal Gateway App main screen.
       PORT:
         default: "8189"
         description: The port number configured in the Terminal Gateway App.
 tags:
-  - name: Client-to-client Terminal API
+  - name: In-person payments C2C API
     description: Payment operations and transactions
 components:
   securitySchemes:
@@ -336,7 +328,7 @@ paths:
   /commands/pay:
     post:
       tags:
-        - Client-to-client Terminal API
+        - In-person payments C2C API
       summary: Create Payment Request
       description: Creates a new payment request on the specified terminal.
       operationId: createPayment
@@ -449,7 +441,7 @@ paths:
   /commands/cancel:
     post:
       tags:
-        - Client-to-client Terminal API
+        - In-person payments C2C API
       summary: Cancel Payment
       description: Cancels an ongoing payment transaction.
       operationId: cancelPayment
@@ -558,7 +550,7 @@ paths:
   /commands/receipt:
     post:
       tags:
-        - Client-to-client Terminal API
+        - In-person payments C2C API
       summary: Print Receipt
       description: Triggers the printing of a transaction receipt on the terminal.
       operationId: printReceipt
@@ -658,7 +650,7 @@ paths:
   /commands/settlement:
     post:
       tags:
-        - Client-to-client Terminal API
+        - In-person payments C2C API
       summary: Settlement
       description: Initiates the settlement process on the terminal.
       operationId: performSettlement
@@ -763,7 +755,7 @@ paths:
   /commands/histories:
     post:
       tags:
-        - Client-to-client Terminal API
+        - In-person payments C2C API
       summary: Transaction List
       description: The application stores a running 24-hour history of past transactions.
       operationId: getTransactionHistory

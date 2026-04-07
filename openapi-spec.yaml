@@ -1,8 +1,8 @@
 openapi: 3.0.3
 info:
-  title: Xendit's Payment Terminal API
+  title: Xendit in-person payments API (H2H)
   version: "0.4.1"
-  description: API specification for Xendit's Payment Terminal (Electronic Data Capture) Payment Sessions and Commands
+  description: API specification for Xendit's in-person payments H2H payment sessions and command endpoints.
 servers:
   - url: https://terminal-dev.xendit.co
     description: Development
@@ -12,7 +12,7 @@ paths:
   /v1/terminal/sessions:
     post:
       tags:
-        - Payments Terminal Api
+        - In-person payments H2H API
       security:
         - BasicAuth: []
       operationId: createTerminalPaymentSession
@@ -64,7 +64,7 @@ paths:
   /v1/terminal/sessions/{id}:
     get:
       tags:
-        - Payments Terminal Api
+        - In-person payments H2H API
       security:
         - BasicAuth: []
       operationId: fetchTerminalPaymentSession
@@ -99,7 +99,7 @@ paths:
   /v1/terminal/sessions/{id}/retry:
     post:
       tags:
-        - Payments Terminal Api
+        - In-person payments H2H API
       security:
         - BasicAuth: []
       operationId: retryTerminalPaymentSession
@@ -122,7 +122,7 @@ paths:
   /v1/terminal/payments/{id}:
     get:
       tags:
-        - Payments Terminal Api
+        - In-person payments H2H API
       security:
         - BasicAuth: []
       operationId: getTerminalPayment
@@ -157,7 +157,7 @@ paths:
   /v1/terminal/payments/{id}/void:
     post:
       tags:
-        - Payments Terminal Api
+        - In-person payments H2H API
       security:
         - BasicAuth: []
       operationId: voidPayment
@@ -198,7 +198,7 @@ paths:
   /v1/terminal/commands:
     post:
       tags:
-        - Payments Terminal Api
+        - In-person payments H2H API
       security:
         - BasicAuth: []
       operationId: PushTerminalCommands
